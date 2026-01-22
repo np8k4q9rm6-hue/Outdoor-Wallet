@@ -1,0 +1,12 @@
+{
+  "name": "outdoor-wallet-feed",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:feed": "node scripts/build-feed.mjs"
+  },
+  "dependencies": {}
+}
