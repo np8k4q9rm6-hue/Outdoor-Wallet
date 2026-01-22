@@ -1,0 +1,44 @@
+name: Community Event Submission
+description: Submit a hunting/fishing event and share with the community
+title: "[Community Event] <Your Event Title>"
+labels: ["community", "pending"]
+assignees: []
+body:
+  - type: input
+    id: title
+    attributes:
+      label: Event Title
+      placeholder: Elk Lottery Draw Deadline
+    validations:
+      required: true
+  - type: input
+    id: date
+    attributes:
+      label: Event Date/Time (ISO8601 UTC, ends with Z)
+      placeholder: 2026-03-15T23:59:00Z
+      description: Use UTC (Z). Example: 2026-03-15T23:59:00Z
+    validations:
+      required: true
+  - type: input
+    id: state
+    attributes:
+      label: State (Full name)
+      placeholder: Colorado
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      options:
+        - Hunting
+        - Fishing
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes (optional)
+      placeholder: Link to official page or details
+    validations:
+      required: false
