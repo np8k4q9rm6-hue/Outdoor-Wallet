@@ -1,0 +1,16 @@
+[
+  {
+    "title": "Elk Lottery Draw Deadline",
+    "date": "2026-03-15T23:59:00Z",
+    "state": "Colorado",
+    "type": "lottery",
+    "notes": "Apply before midnight [Imported]"
+  },
+  {
+    "title": "Spring Trout Stocking",
+    "date": "2026-04-10T13:00:00Z",
+    "state": "Michigan",
+    "type": "stocking",
+    "notes": "[Imported]"
+  }
+]
