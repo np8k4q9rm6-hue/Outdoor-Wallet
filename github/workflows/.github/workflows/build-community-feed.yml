@@ -1,57 +1,128 @@
-name: "Community Event Submission"
-description: "Submit a hunting or fishing event to share with the community"
-title: "[Community Event] <Your Event Title>"
-labels: ["community", "pending"]
-assignees: []
-body:
-  - type: input
-    id: title
-    attributes:
-      label: "Event Title"
-      placeholder: "Deer Season Application Deadline"
-    validations:
-      required: true
+name: Build Community Events Feed
 
-  - type: input
-    id: date
-    attributes:
-      label: "Event Date/Time (ISO8601 UTC, ends with Z)"
-      placeholder: "2026-03-15T23:59:00Z"
-      description: |
-        Use Zulu (UTC) time in ISO8601 format. Examples:
-        - 2026-03-15T23:59:00Z  (March 15, 2026 at 23:59 UTC)
-        - 2026-11-01T05:00:00Z  (Nov 1, 2026 at 05:00 UTC)
+on:
+  workflow_dispatch: {}
+  issues:
+    types: [labeled, unlabeled, edited, opened, closed]
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC (optional)
 
-        Quick rules:
-        - Include the letter 'T' between date and time.
-        - End with 'Z' to indicate UTC (Zulu).
-        - Use 24-hour time (00–23).
-        - Include seconds (e.g., :00).
-    validations:
-      required: true
+permissions:
+  contents: write
+  issues: read
 
-  - type: input
-    id: state
-    attributes:
-      label: "State (Full name)"
-      placeholder: "Ohio"
-    validations:
-      required: true
+jobs:
+  build-feed:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-  - type: dropdown
-    id: type
-    attributes:
-      label: "Type"
-      options:
-        - "hunting"
-        - "fishing"
-    validations:
-      required: true
+      - name: Install tools (jq, gh)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          type -p gh >/dev/null || { curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg; \
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg; \
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null; \
+            sudo apt-get update; sudo apt-get install -y gh; }
 
-  - type: textarea
-    id: notes
-    attributes:
-      label: "Notes (optional)"
-      placeholder: "Link to official page or details"
-    validations:
-      required: false
+      - name: Generate community-events.json from approved issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Fetch open issues labeled 'community' AND 'approved'
+          gh api -H "Accept: application/vnd.github+json" \
+            "/repos/$REPO/issues?state=open&labels=community,approved&per_page=100" > issues.json
+
+          node <<'NODE'
+          const fs = require('fs');
+
+          function parseBody(body) {
+            const lines = (body || '').split('\n').map(l => l.trim());
+
+            const get = (label) => {
+              const idx = lines.findIndex(l => l.toLowerCase() === `### ${label}`.toLowerCase());
+              if (idx >= 0) {
+                for (let i = idx + 1; i < lines.length; i++) {
+                  if (lines[i] && !lines[i].startsWith('###')) return lines[i];
+                }
+              }
+              const kv = lines.find(l => l.toLowerCase().startsWith(`${label.toLowerCase()}:`));
+              if (kv) return kv.split(':').slice(1).join(':').trim();
+              return '';
+            };
+
+            const title = get('Event Title');
+            const date = get('Event Date/Time (ISO8601 UTC, ends with Z)') || get('Date') || get('Event Date');
+            const state = get('State (Full name)') || get('State');
+            const type = get('Type');
+            const notes = get('Notes (optional)') || get('Notes');
+
+            return { title, date, state, type, notes };
+          }
+
+          const issues = JSON.parse(fs.readFileSync('issues.json', 'utf8'));
+
+          const events = [];
+          for (const issue of issues) {
+            const parsed = parseBody(issue.body);
+
+            // Basic validation
+            if (!parsed.title || !parsed.date || !parsed.state || !parsed.type) continue;
+
+            // Enforce types: 'hunting' or 'fishing' only (map legacy 'stocking' -> 'fishing', 'lottery' -> 'hunting')
+            let normalizedType = parsed.type.toLowerCase();
+            if (normalizedType === 'stocking') normalizedType = 'fishing';
+            if (normalizedType === 'lottery') normalizedType = 'hunting';
+            if (!['hunting', 'fishing'].includes(normalizedType)) continue;
+
+            // Require timezone at end: 'Z' or offset like -05:00
+            if (!/[Z+-]\d{2}:?\d{2}$/.test(parsed.date)) continue;
+
+            events.push({
+              title: parsed.title,
+              date: parsed.date,
+              state: parsed.state,
+              type: normalizedType,
+              notes: parsed.notes || ''
+            });
+          }
+
+          // Deduplicate by title+state+type+date
+          const key = e => [e.title.trim(), e.state.trim(), e.type, e.date].join('|').toLowerCase();
+          const seen = new Set();
+          const deduped = [];
+          for (const e of events) {
+            const k = key(e);
+            if (!seen.has(k)) {
+              seen.add(k);
+              deduped.push(e);
+            }
+          }
+
+          // Sort by date ascending
+          deduped.sort((a, b) => a.date.localeCompare(b.date));
+
+          fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\\n', 'utf8');
+          console.log(\`Wrote community-events.json with \${deduped.length} events\`);
+          NODE
+
+      - name: Commit and push if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git status --porcelain | grep -q "community-events.json"; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add community-events.json
+            git commit -m "chore(feed): update community-events.json from approved issues [skip ci]"
+            git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:${{ github.ref_name }}
+          else
+            echo "No changes to commit."
+          fi
