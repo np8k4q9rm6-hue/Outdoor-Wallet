@@ -1,3 +1,4 @@
+```yaml
 name: "Community Event Submission"
 description: "Submit a hunting/fishing lottery or fishing event to share with the community"
 title: "[Community Event] <Your Event Title>"
@@ -12,7 +13,7 @@ body:
     validations:
       required: true
 
-- type: input
+  - type: input
     id: date
     attributes:
       label: "Event Date/Time (ISO8601 UTC, ends with Z)"
