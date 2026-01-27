@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""
+Aggregate approved community event submissions from GitHub Issues into JSON feeds.
+
+Outputs:
+- community-events.json (combined feed at repo root)
+- feeds/<state-slug>.json (per-state feeds)
+
+Only processes issues with labels: community + approved
+"""
+
+import json
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+import requests
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+REPO = os.environ.get("REPO", "owner/repo")
+API_BASE = f"https://api.github.com/repos/{REPO}"
+
+HEADERS = {
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github.v3+json",
+}
+
+
+def slugify(text: str) -> str:
+    """Convert state name to lowercase slug (e.g., 'Ohio' -> 'ohio')."""
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def parse_issue_body(body: str) -> dict[str, Any]:
+    """
+    Parse GitHub issue body from the Community Event Submission template.
+    Expected format:
+    
+    ### Event Title
+    <title>
+    
+    ### Event Date
+    <date>
+    
+    ### State
+    <state>
+    
+    ### County
+    <county>
+    
+    ### Event Type
+    <type>
+    
+    ### Additional Notes
+    <notes>
+    """
+    result = {
+        "title": "",
+        "date": "",
+        "state": "",
+        "county": "",
+        "type": "other",
+        "notes": "",
+    }
+    
+    if not body:
+        return result
+    
+    # Split by ### headers
+    sections = re.split(r"###\s+", body)
+    
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+            
+        lines = section.split("\n", 1)
+        header = lines[0].strip().lower()
+        content = lines[1].strip() if len(lines) > 1 else ""
+        
+        # Remove common markdown artifacts
+        content = re.sub(r"^[_*]+|[_*]+$", "", content).strip()
+        content = re.sub(r"^-\s+", "", content).strip()
+        
+        if "event title" in header:
+            result["title"] = content
+        elif "event date" in header or "date" in header:
+            result["date"] = content
+        elif "state" in header:
+            result["state"] = content
+        elif "county" in header:
+            result["county"] = content
+        elif "event type" in header or "type" in header:
+            result["type"] = content.lower()
+        elif "note" in header or "additional" in header:
+            result["notes"] = content
+    
+    return result
+
+
+def normalize_event_type(raw_type: str) -> str:
+    """Normalize event type to: hunting, fishing, or other."""
+    raw_lower = raw_type.lower().strip()
+    
+    if any(word in raw_lower for word in ["hunt", "deer", "turkey", "waterfowl", "upland"]):
+        return "hunting"
+    elif any(word in raw_lower for word in ["fish", "stock", "trout", "bass"]):
+        return "fishing"
+    else:
+        return "other"
+
+
+def normalize_date(date_str: str) -> str:
+    """
+    Convert various date formats to ISO8601 with Zulu timezone.
+    Accepts: ISO8601, YYYY-MM-DD, MM/DD/YYYY, etc.
+    Returns: YYYY-MM-DDTHH:MM:SSZ
+    """
+    date_str = date_str.strip()
+    
+    # Try parsing various formats
+    formats = [
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m-%d-%Y",
+    ]
+    
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            # Default to 23:59:00 UTC if no time specified
+            if "T" not in date_str:
+                dt = dt.replace(hour=23, minute=59, second=0)
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            continue
+    
+    # If all parsing fails, return as-is (validation will catch it)
+    return date_str
+
+
+def fetch_approved_issues() -> list[dict]:
+    """Fetch all open issues with 'community' and 'approved' labels."""
+    url = f"{API_BASE}/issues"
+    params = {
+        "state": "open",
+        "labels": "community,approved",
+        "per_page": 100,
+    }
+    
+    issues = []
+    page = 1
+    
+    while True:
+        params["page"] = page
+        response = requests.get(url, headers=HEADERS, params=params)
+        response.raise_for_status()
+        
+        batch = response.json()
+        if not batch:
+            break
+            
+        issues.extend(batch)
+        page += 1
+    
+    return issues
+
+
+def validate_event(event: dict) -> bool:
+    """Check if event has all required fields."""
+    required = ["title", "date", "state", "county", "type"]
+    
+    for field in required:
+        if not event.get(field):
+            return False
+    
+    # Validate date format
+    date_str = event["date"]
+    try:
+        datetime.strptime(date_str, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    
+    return True
+
+
+def main():
+    print(f"Fetching approved community events from {REPO}...")
+    
+    issues = fetch_approved_issues()
+    print(f"Found {len(issues)} approved issues.")
+    
+    events = []
+    per_state = {}
+    
+    for issue in issues:
+        body = issue.get("body", "")
+        parsed = parse_issue_body(body)
+        
+        # Normalize
+        parsed["type"] = normalize_event_type(parsed["type"])
+        parsed["date"] = normalize_date(parsed["date"])
+        
+        # Validate
+        if not validate_event(parsed):
+            print(f"⚠️  Skipping issue #{issue['number']}: Invalid or missing required fields")
+            continue
+        
+        # Build event object
+        event = {
+            "title": parsed["title"],
+            "date": parsed["date"],
+            "state": parsed["state"],
+            "county": parsed["county"],
+            "type": parsed["type"],
+            "notes": parsed["notes"],
+        }
+        
+        events.append(event)
+        
+        # Group by state
+        state_slug = slugify(parsed["state"])
+        if state_slug not in per_state:
+            per_state[state_slug] = []
+        per_state[state_slug].append(event)
+        
+        print(f"✓ Imported: {parsed['title']} ({parsed['state']}, {parsed['county']})")
+    
+    # Write combined feed
+    combined_path = Path("community-events.json")
+    combined_path.write_text(json.dumps(events, indent=2))
+    print(f"\n📄 Wrote {len(events)} events to {combined_path}")
+    
+    # Write per-state feeds
+    feeds_dir = Path("feeds")
+    feeds_dir.mkdir(exist_ok=True)
+    
+    for state_slug, state_events in per_state.items():
+        state_path = feeds_dir / f"{state_slug}.json"
+        state_path.write_text(json.dumps(state_events, indent=2))
+        print(f"   📄 Wrote {len(state_events)} events to {state_path}")
+    
+    print("\n✅ Community events aggregation complete!")
+
+
+if __name__ == "__main__":
+    main()
