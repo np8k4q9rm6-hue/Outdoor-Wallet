@@ -13,9 +13,13 @@ types:
 schedule:
 - cron: "0 6 * * *"
 
+
 permissions:
 contents: write
 issues: read
+
+After this header, include the jobs: section. Here’s a minimal continuation you can paste right after the block above to make a complete, valid file:
+
 jobs:
 build-feed:
 runs-on: ubuntu-latest
@@ -68,9 +72,6 @@ steps:
 
       set -euo pipefail
 
-
-      # Fetch open issues labeled 'community' AND 'approved'
-
       gh api -H "Accept: application/vnd.github+json" \
 
         "/repos/$REPO/issues?state=open&labels=community,approved&per_page=100" > issues.json
@@ -84,7 +85,6 @@ steps:
       function parseBody(body) {
 
         const lines = (body || '').split('\n').map(l => l.trim());
-
 
         const get = (label) => {
 
@@ -102,8 +102,6 @@ steps:
 
           }
 
-          // Fallback: key: value
-
           const kv = lines.find(l => l.toLowerCase().startsWith(label.toLowerCase() + ':'));
 
           if (kv) return kv.split(':').slice(1).join(':').trim();
@@ -111,7 +109,6 @@ steps:
           return '';
 
         };
-
 
         const title = get('Event Title');
 
@@ -123,14 +120,12 @@ steps:
 
         const notes = get('Notes (optional)') || get('Notes');
 
-
         return { title, date, state, type, notes };
 
       }
 
 
       const issues = JSON.parse(fs.readFileSync('issues.json', 'utf8'));
-
 
       const events = [];
 
@@ -141,8 +136,6 @@ steps:
         if (!parsed.title || !parsed.date || !parsed.state || !parsed.type) continue;
 
 
-        // Normalize type: accept 'hunting' and 'fishing' only (map legacy names)
-
         let normalizedType = (parsed.type || '').toLowerCase();
 
         if (normalizedType === 'stocking') normalizedType = 'fishing';
@@ -151,8 +144,6 @@ steps:
 
         if (!['hunting', 'fishing'].includes(normalizedType)) continue;
 
-
-        // Require timezone: Z or numeric offset
 
         if (!/[Z+-]\d{2}:?\d{2}$/.test(parsed.date)) continue;
 
@@ -196,7 +187,6 @@ steps:
 
 
       deduped.sort((a, b) => a.date.localeCompare(b.date));
-
 
       fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\n', 'utf8');
 
