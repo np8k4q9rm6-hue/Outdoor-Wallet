@@ -1,4 +1,5 @@
 name: Build Community Events Feed
+
 on:
   workflow_dispatch: {}
   issues:
@@ -18,9 +19,13 @@ permissions:
 jobs:
   build-feed:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Needed so we can pull --rebase and push without non-fast-forward errors
+          fetch-depth: 0
 
       - name: Build community-events.json from approved issues
         uses: actions/github-script@v7
@@ -47,7 +52,6 @@ jobs:
                     if (lines[i] && !lines[i].startsWith('###')) return lines[i];
                   }
                 }
-                // Fallback: "key: value"
                 const kv = lines.find(l => l.toLowerCase().startsWith(label.toLowerCase() + ':'));
                 if (kv) return kv.split(':').slice(1).join(':').trim();
                 return '';
@@ -67,7 +71,7 @@ jobs:
               const parsed = parseBody(issue.body || '');
               if (!parsed.title || !parsed.date || !parsed.state || !parsed.type) continue;
 
-              // Normalize to allowed types: 'hunting' or 'fishing'
+              // Normalize to 'hunting' or 'fishing' only
               let t = (parsed.type || '').toLowerCase();
               if (t === 'stocking') t = 'fishing';
               if (t === 'lottery') t = 'hunting';
@@ -103,8 +107,22 @@ jobs:
             fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\n', 'utf8');
             core.info(`Wrote community-events.json with ${deduped.length} events`);
 
-      - name: Commit feed if changed
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore(feed): update community-events.json [skip ci]"
-          file_pattern: community-events.json
+      - name: Pull, commit and push changes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Ensure we're on main and up-to-date
+          git checkout main
+          git pull --rebase origin main
+
+          if git status --porcelain | grep -q "community-events.json"; then
+            git add community-events.json
+            git commit -m "chore(feed): update community-events.json [skip ci]"
+            git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
+          else
+            echo "No changes to commit."
+          fi
