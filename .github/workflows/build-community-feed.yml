@@ -1,35 +1,4 @@
-name: Build Community Events Feed
-
-on:
-  workflow_dispatch: {}
-  issues:
-    types: [labeled, unlabeled, edited, opened, closed]
-  schedule:
-    - cron: "0 6 * * *" # daily at 06:00 UTC (optional)
-
-permissions:
-  contents: write
-  issues: read
-
-jobs:
-  build-feed:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Install tools (jq, gh)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq
-          type -p gh >/dev/null || { curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg; \
-            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg; \
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null; \
-            sudo apt-get update; sudo apt-get install -y gh; }
-
-      - name: Generate community-events.json from approved issues
+- name: Generate community-events.json from approved issues
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -40,20 +9,20 @@ jobs:
           gh api -H "Accept: application/vnd.github+json" \
             "/repos/$REPO/issues?state=open&labels=community,approved&per_page=100" > issues.json
 
-          node <<'NODE'
+          node <<'EOF'
           const fs = require('fs');
 
           function parseBody(body) {
             const lines = (body || '').split('\n').map(l => l.trim());
 
             const get = (label) => {
-              const idx = lines.findIndex(l => l.toLowerCase() === `### ${label}`.toLowerCase());
+              const idx = lines.findIndex(l => l.toLowerCase() === ("### " + label).toLowerCase());
               if (idx >= 0) {
                 for (let i = idx + 1; i < lines.length; i++) {
                   if (lines[i] && !lines[i].startsWith('###')) return lines[i];
                 }
               }
-              const kv = lines.find(l => l.toLowerCase().startsWith(`${label.toLowerCase()}:`));
+              const kv = lines.find(l => l.toLowerCase().startsWith((label.toLowerCase() + ":")));
               if (kv) return kv.split(':').slice(1).join(':').trim();
               return '';
             };
@@ -72,17 +41,15 @@ jobs:
           const events = [];
           for (const issue of issues) {
             const parsed = parseBody(issue.body);
-
-            // Basic validation
             if (!parsed.title || !parsed.date || !parsed.state || !parsed.type) continue;
 
-            // Enforce types: 'hunting' or 'fishing' only (map legacy 'stocking' -> 'fishing', 'lottery' -> 'hunting')
-            let normalizedType = parsed.type.toLowerCase();
+            // Normalize type: accept 'hunting' and 'fishing' only (map legacy names)
+            let normalizedType = (parsed.type || '').toLowerCase();
             if (normalizedType === 'stocking') normalizedType = 'fishing';
             if (normalizedType === 'lottery') normalizedType = 'hunting';
             if (!['hunting', 'fishing'].includes(normalizedType)) continue;
 
-            // Require timezone at end: 'Z' or offset like -05:00
+            // Require timezone: Z or numeric offset
             if (!/[Z+-]\d{2}:?\d{2}$/.test(parsed.date)) continue;
 
             events.push({
@@ -94,7 +61,6 @@ jobs:
             });
           }
 
-          // Deduplicate by title+state+type+date
           const key = e => [e.title.trim(), e.state.trim(), e.type, e.date].join('|').toLowerCase();
           const seen = new Set();
           const deduped = [];
@@ -106,23 +72,8 @@ jobs:
             }
           }
 
-          // Sort by date ascending
           deduped.sort((a, b) => a.date.localeCompare(b.date));
 
-          fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\\n', 'utf8');
-          console.log(\`Wrote community-events.json with \${deduped.length} events\`);
-          NODE
-
-      - name: Commit and push if changed
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if git status --porcelain | grep -q "community-events.json"; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add community-events.json
-            git commit -m "chore(feed): update community-events.json from approved issues [skip ci]"
-            git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:${{ github.ref_name }}
-          else
-            echo "No changes to commit."
-          fi
+          fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\n', 'utf8');
+          console.log("Wrote community-events.json with " + deduped.length + " events");
+          EOF
