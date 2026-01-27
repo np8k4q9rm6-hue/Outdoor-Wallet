@@ -1,5 +1,5 @@
 name: "Community Event Submission"
-description: "Submit a hunting or fishing event to share with the community"
+description: "Submit an event to share with the community"
 title: "[Community Event] <Your Event Title>"
 labels: ["community", "pending"]
 assignees: []
@@ -8,7 +8,7 @@ body:
     id: title
     attributes:
       label: "Event Title"
-      placeholder: "Deer Season Application Deadline"
+      placeholder: "Youth fishing event"
     validations:
       required: true
 
@@ -38,6 +38,14 @@ body:
     validations:
       required: true
 
+  - type: input
+    id: county
+    attributes:
+      label: "County"
+      placeholder: "Franklin"
+    validations:
+      required: true
+
   - type: dropdown
     id: type
     attributes:
@@ -45,6 +53,7 @@ body:
       options:
         - "hunting"
         - "fishing"
+        - "other"
     validations:
       required: true
 
@@ -52,6 +61,6 @@ body:
     id: notes
     attributes:
       label: "Notes (optional)"
-      placeholder: "Link to official page or details"
+      placeholder: "Bring your own gear."
     validations:
       required: false
