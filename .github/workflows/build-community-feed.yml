@@ -20,6 +20,14 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          
+      - name: Make script executable
+        run: chmod +x scripts/aggregate-community-events.py
           
       - name: Build community events feeds
         env:
@@ -31,6 +39,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add community-events.json feeds/*.json
-          git diff --staged --quiet || git commit -m "Update community events feeds [skip ci]"
-          git push
+          git add -A community-events.json feeds/
+          if ! git diff --staged --quiet; then
+            git commit -m "Update community events feeds [skip ci]"
+            git push
+          else
+            echo "No changes to commit"
+          fi
