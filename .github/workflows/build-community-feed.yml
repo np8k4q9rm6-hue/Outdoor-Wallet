@@ -1,142 +1,36 @@
-name: Build Community Events Feed
+name: Build Community Events Feeds
 
 on:
-  workflow_dispatch: {}
   issues:
-    types:
-      - labeled
-      - unlabeled
-      - edited
-      - opened
-      - closed
-  schedule:
-    - cron: "0 6 * * *"
+    types: [labeled, unlabeled, edited, opened, closed, reopened]
+  workflow_dispatch:
 
 permissions:
   contents: write
   issues: read
 
-concurrency:
-  group: build-community-feed
-  cancel-in-progress: true
-
 jobs:
-  build-feed:
+  build-feeds:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          fetch-depth: 0
-
-      - name: Build community-events.json and per-state feeds
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-
-            // Fetch open issues labeled 'community' AND 'approved' (exclude PRs)
-            const { owner, repo } = context.repo;
-            const all = await github.paginate(
-              github.rest.issues.listForRepo,
-              { owner, repo, state: 'open', labels: 'community,approved', per_page: 100 }
-            );
-            const issues = all.filter(i => !i.pull_request);
-
-            function parseBody(body) {
-              const lines = (body || '').split('\n').map(l => l.trim());
-              const get = (label) => {
-                const header = ('### ' + label).toLowerCase();
-                const idx = lines.findIndex(l => l.toLowerCase() === header);
-                if (idx >= 0) {
-                  for (let i = idx + 1; i < lines.length; i++) {
-                    if (lines[i] && !lines[i].startsWith('###')) return lines[i];
-                  }
-                }
-                const kv = lines.find(l => l.toLowerCase().startsWith(label.toLowerCase() + ':'));
-                if (kv) return kv.split(':').slice(1).join(':').trim();
-                return '';
-              };
-              const title = get('Event Title');
-              const date = get('Event Date/Time (ISO8601 UTC, ends with Z)') || get('Date') || get('Event Date');
-              const state = get('State (Full name)') || get('State');
-              const county = get('County');
-              const type = get('Type');
-              const notes = get('Notes (optional)') || get('Notes');
-              return { title, date, state, county, type, notes };
-            }
-
-            const events = [];
-            for (const issue of issues) {
-              const p = parseBody(issue.body || '');
-              if (!p.title || !p.date || !p.state || !p.county || !p.type) continue; // county required
-
-              // Normalize type
-              let t = (p.type || '').toLowerCase();
-              if (t === 'stocking') t = 'fishing';
-              if (t === 'lottery') t = 'hunting';
-              if (!['hunting','fishing','other'].includes(t)) continue;
-
-              // Require timezone: 'Z' or numeric offset
-              if (!/[Z+-]\d{2}:?\d{2}$/.test(p.date)) continue;
-
-              events.push({
-                title: p.title,
-                date: p.date,
-                state: p.state,
-                county: p.county,
-                type: t,
-                notes: p.notes || ''
-              });
-            }
-
-            // Deduplicate by title+state+county+type+date
-            const key = e => [e.title.trim(), e.state.trim(), e.county.trim(), e.type, e.date].join('|').toLowerCase();
-            const seen = new Set();
-            const deduped = [];
-            for (const e of events) {
-              const k = key(e);
-              if (!seen.has(k)) { seen.add(k); deduped.push(e); }
-            }
-
-            // Sort by date ascending
-            deduped.sort((a, b) => a.date.localeCompare(b.date));
-
-            // Write combined feed
-            fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\n', 'utf8');
-            core.info(`Wrote community-events.json with ${deduped.length} events`);
-
-            // Write per-state feeds
-            fs.mkdirSync('feeds', { recursive: true });
-            const byState = new Map();
-            for (const e of deduped) {
-              const slug = e.state.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-              if (!byState.has(slug)) byState.set(slug, []);
-              byState.get(slug).push(e);
-            }
-            for (const [slug, list] of byState.entries()) {
-              const outPath = path.join('feeds', `${slug}.json`);
-              fs.writeFileSync(outPath, JSON.stringify(list, null, 2) + '\n', 'utf8');
-              core.info(`Wrote ${outPath} with ${list.length} events`);
-            }
-
-      - name: Pull, commit and push changes
+          python-version: '3.11'
+          
+      - name: Build community events feeds
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: python scripts/aggregate-community-events.py
+        
+      - name: Commit and push feeds
         run: |
-          set -euo pipefail
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git checkout main
-          git pull --rebase origin main
-
-          if ! git diff --quiet -- community-events.json feeds; then
-            git add community-events.json feeds || true
-            git commit -m "chore(feed): update community & per-state feeds [skip ci]"
-            git push https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
-          else
-            echo "No changes to commit."
-          fi
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add community-events.json feeds/*.json
+          git diff --staged --quiet || git commit -m "Update community events feeds [skip ci]"
+          git push
