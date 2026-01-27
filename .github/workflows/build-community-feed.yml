@@ -1,79 +1,190 @@
-- name: Generate community-events.json from approved issues
-  env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
- run: |
-          set -euo pipefail
+name: Build Community Events Feed
+on:
+workflow_dispatch: {}
+issues:
+types:
 
-          # Fetch open issues labeled 'community' AND 'approved'
-          gh api -H "Accept: application/vnd.github+json" \
-            "/repos/$REPO/issues?state=open&labels=community,approved&per_page=100" > issues.json
+  - labeled
+  - unlabeled
+  - edited
+  - opened
+  - closed
 
-          node <<'EOF'
-          const fs = require('fs');
+schedule:
+- cron: "0 6 * * *"
 
-          function parseBody(body) {
-            const lines = (body || '').split('\n').map(l => l.trim());
+permissions:
+contents: write
+issues: read
+jobs:
+build-feed:
+runs-on: ubuntu-latest
 
-            const get = (label) => {
-              const idx = lines.findIndex(l => l.toLowerCase() === ("### " + label).toLowerCase());
-              if (idx >= 0) {
-                for (let i = idx + 1; i < lines.length; i++) {
-                  if (lines[i] && !lines[i].startsWith('###')) return lines[i];
-                }
+steps:
+
+  - name: Checkout
+
+    uses: actions/checkout@v4
+
+
+  - name: Build community-events.json from approved issues
+
+    uses: actions/github-script@v7
+
+    with:
+
+      script: |
+
+        const fs = require('fs');
+
+
+        // Fetch open issues labeled 'community' AND 'approved' (exclude PRs)
+
+        const owner = context.repo.owner;
+
+        const repo = context.repo.repo;
+
+        const issues = await github.paginate(
+
+          github.rest.issues.listForRepo,
+
+          { owner, repo, state: 'open', labels: 'community,approved', per_page: 100 }
+
+        );
+
+        const onlyIssues = issues.filter(i => !i.pull_request);
+
+
+        function parseBody(body) {
+
+          const lines = (body || '').split('\n').map(l => l.trim());
+
+
+          const get = (label) => {
+
+            const header = ('### ' + label).toLowerCase();
+
+            const idx = lines.findIndex(l => l.toLowerCase() === header);
+
+            if (idx >= 0) {
+
+              for (let i = idx + 1; i < lines.length; i++) {
+
+                if (lines[i] && !lines[i].startsWith('###')) return lines[i];
+
               }
-              const kv = lines.find(l => l.toLowerCase().startsWith((label.toLowerCase() + ":")));
-              if (kv) return kv.split(':').slice(1).join(':').trim();
-              return '';
-            };
 
-            const title = get('Event Title');
-            const date = get('Event Date/Time (ISO8601 UTC, ends with Z)') || get('Date') || get('Event Date');
-            const state = get('State (Full name)') || get('State');
-            const type = get('Type');
-            const notes = get('Notes (optional)') || get('Notes');
-
-            return { title, date, state, type, notes };
-          }
-
-          const issues = JSON.parse(fs.readFileSync('issues.json', 'utf8'));
-
-          const events = [];
-          for (const issue of issues) {
-            const parsed = parseBody(issue.body);
-            if (!parsed.title || !parsed.date || !parsed.state || !parsed.type) continue;
-
-            // Normalize type: accept 'hunting' and 'fishing' only (map legacy names)
-            let normalizedType = (parsed.type || '').toLowerCase();
-            if (normalizedType === 'stocking') normalizedType = 'fishing';
-            if (normalizedType === 'lottery') normalizedType = 'hunting';
-            if (!['hunting', 'fishing'].includes(normalizedType)) continue;
-
-            // Require timezone: Z or numeric offset
-            if (!/[Z+-]\d{2}:?\d{2}$/.test(parsed.date)) continue;
-
-            events.push({
-              title: parsed.title,
-              date: parsed.date,
-              state: parsed.state,
-              type: normalizedType,
-              notes: parsed.notes || ''
-            });
-          }
-
-          const key = e => [e.title.trim(), e.state.trim(), e.type, e.date].join('|').toLowerCase();
-          const seen = new Set();
-          const deduped = [];
-          for (const e of events) {
-            const k = key(e);
-            if (!seen.has(k)) {
-              seen.add(k);
-              deduped.push(e);
             }
+
+            // Fallback: "key: value"
+
+            const kv = lines.find(l => l.toLowerCase().startsWith(label.toLowerCase() + ':'));
+
+            if (kv) return kv.split(':').slice(1).join(':').trim();
+
+            return '';
+
+          };
+
+
+          const title = get('Event Title');
+
+          const date = get('Event Date/Time (ISO8601 UTC, ends with Z)') || get('Date') || get('Event Date');
+
+          const state = get('State (Full name)') || get('State');
+
+          const type = get('Type');
+
+          const notes = get('Notes (optional)') || get('Notes');
+
+
+          return { title, date, state, type, notes };
+
+        }
+
+
+        const events = [];
+
+        for (const issue of onlyIssues) {
+
+          const parsed = parseBody(issue.body || '');
+
+          if (!parsed.title || !parsed.date || !parsed.state || !parsed.type) continue;
+
+
+          // Normalize to the two allowed types: 'hunting' or 'fishing'
+
+          let t = (parsed.type || '').toLowerCase();
+
+          if (t === 'stocking') t = 'fishing';
+
+          if (t === 'lottery') t = 'hunting';
+
+          if (!['hunting', 'fishing'].includes(t)) continue;
+
+
+          // Require timezone: 'Z' or numeric offset (e.g., -05:00)
+
+          if (!/[Z+-]\d{2}:?\d{2}$/.test(parsed.date)) continue;
+
+
+          events.push({
+
+            title: parsed.title,
+
+            date: parsed.date,
+
+            state: parsed.state,
+
+            type: t,
+
+            notes: parsed.notes || ''
+
+          });
+
+        }
+
+
+        // Deduplicate by title+state+type+date
+
+        const key = e => [e.title.trim(), e.state.trim(), e.type, e.date].join('|').toLowerCase();
+
+        const seen = new Set();
+
+        const deduped = [];
+
+        for (const e of events) {
+
+          const k = key(e);
+
+          if (!seen.has(k)) {
+
+            seen.add(k);
+
+            deduped.push(e);
+
           }
 
-          deduped.sort((a, b) => a.date.localeCompare(b.date));
+        }
 
-          fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\n', 'utf8');
-          console.log("Wrote community-events.json with " + deduped.length + " events");
-          EOF
+
+        // Sort by date ascending
+
+        deduped.sort((a, b) => a.date.localeCompare(b.date));
+
+
+        fs.writeFileSync('community-events.json', JSON.stringify(deduped, null, 2) + '\n', 'utf8');
+
+        core.info(`Wrote community-events.json with ${deduped.length} events`);
+
+
+  - name: Commit feed if changed
+
+    uses: stefanzweifel/git-auto-commit-action@v5
+
+    with:
+
+      commit_message: "chore(feed): update community-events.json [skip ci]"
+
+      file_pattern: community-events.json
+
