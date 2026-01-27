@@ -12,20 +12,40 @@ Only processes issues with labels: community + approved
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
-import requests
+try:
+    import requests
+except ImportError:
+    print("ERROR: 'requests' library not found. Install with: pip install requests")
+    sys.exit(1)
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 REPO = os.environ.get("REPO", "owner/repo")
 API_BASE = f"https://api.github.com/repos/{REPO}"
 
+# Check for required environment variables
+if not GITHUB_TOKEN:
+    print("ERROR: GITHUB_TOKEN environment variable not set")
+    sys.exit(1)
+
+if REPO == "owner/repo":
+    print("ERROR: REPO environment variable not set")
+    sys.exit(1)
+
 HEADERS = {
     "Authorization": f"token {GITHUB_TOKEN}",
     "Accept": "application/vnd.github.v3+json",
 }
+
+print(f"🔧 Configuration:")
+print(f"   Repository: {REPO}")
+print(f"   API Base: {API_BASE}")
+print(f"   Token: {'✓ Set' if GITHUB_TOKEN else '✗ Missing'}")
+print()
 
 
 def slugify(text: str) -> str:
@@ -33,7 +53,7 @@ def slugify(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
-def parse_issue_body(body: str) -> dict[str, Any]:
+def parse_issue_body(body: str) -> Dict[str, Any]:
     """
     Parse GitHub issue body from the Community Event Submission template.
     Expected format:
@@ -83,10 +103,13 @@ def parse_issue_body(body: str) -> dict[str, Any]:
         # Remove common markdown artifacts
         content = re.sub(r"^[_*]+|[_*]+$", "", content).strip()
         content = re.sub(r"^-\s+", "", content).strip()
+        # Remove "No response" placeholder
+        if content.lower() in ["no response", "_no response_"]:
+            content = ""
         
-        if "event title" in header:
+        if "event title" in header or header == "title":
             result["title"] = content
-        elif "event date" in header or "date" in header:
+        elif "event date" in header or header == "date":
             result["date"] = content
         elif "state" in header:
             result["state"] = content
@@ -127,6 +150,7 @@ def normalize_date(date_str: str) -> str:
         "%Y-%m-%d",
         "%m/%d/%Y",
         "%m-%d-%Y",
+        "%d/%m/%Y",
     ]
     
     for fmt in formats:
@@ -143,7 +167,7 @@ def normalize_date(date_str: str) -> str:
     return date_str
 
 
-def fetch_approved_issues() -> list[dict]:
+def fetch_approved_issues() -> List[Dict]:
     """Fetch all open issues with 'community' and 'approved' labels."""
     url = f"{API_BASE}/issues"
     params = {
@@ -155,22 +179,41 @@ def fetch_approved_issues() -> list[dict]:
     issues = []
     page = 1
     
-    while True:
-        params["page"] = page
-        response = requests.get(url, headers=HEADERS, params=params)
-        response.raise_for_status()
-        
-        batch = response.json()
-        if not batch:
-            break
+    try:
+        while True:
+            params["page"] = page
+            print(f"   Fetching page {page}...")
+            response = requests.get(url, headers=HEADERS, params=params, timeout=30)
             
-        issues.extend(batch)
-        page += 1
+            if response.status_code == 401:
+                print("ERROR: Authentication failed. Check GITHUB_TOKEN.")
+                sys.exit(1)
+            elif response.status_code == 404:
+                print(f"ERROR: Repository not found: {REPO}")
+                sys.exit(1)
+            
+            response.raise_for_status()
+            
+            batch = response.json()
+            if not batch:
+                break
+                
+            issues.extend(batch)
+            page += 1
+            
+            # Safety limit
+            if page > 10:
+                print("WARNING: Reached page limit (10). Some issues may be missed.")
+                break
+    
+    except requests.exceptions.RequestException as e:
+        print(f"ERROR: Failed to fetch issues: {e}")
+        sys.exit(1)
     
     return issues
 
 
-def validate_event(event: dict) -> bool:
+def validate_event(event: Dict) -> bool:
     """Check if event has all required fields."""
     required = ["title", "date", "state", "county", "type"]
     
@@ -189,63 +232,104 @@ def validate_event(event: dict) -> bool:
 
 
 def main():
-    print(f"Fetching approved community events from {REPO}...")
+    print(f"🔍 Fetching approved community events from {REPO}...")
+    print()
     
     issues = fetch_approved_issues()
-    print(f"Found {len(issues)} approved issues.")
+    print(f"✓ Found {len(issues)} approved issue(s).")
+    print()
     
-    events = []
-    per_state = {}
-    
-    for issue in issues:
-        body = issue.get("body", "")
-        parsed = parse_issue_body(body)
+    if len(issues) == 0:
+        print("⚠️  No approved issues found. Creating empty feeds...")
+        events = []
+        per_state = {}
+    else:
+        events = []
+        per_state = {}
         
-        # Normalize
-        parsed["type"] = normalize_event_type(parsed["type"])
-        parsed["date"] = normalize_date(parsed["date"])
-        
-        # Validate
-        if not validate_event(parsed):
-            print(f"⚠️  Skipping issue #{issue['number']}: Invalid or missing required fields")
-            continue
-        
-        # Build event object
-        event = {
-            "title": parsed["title"],
-            "date": parsed["date"],
-            "state": parsed["state"],
-            "county": parsed["county"],
-            "type": parsed["type"],
-            "notes": parsed["notes"],
-        }
-        
-        events.append(event)
-        
-        # Group by state
-        state_slug = slugify(parsed["state"])
-        if state_slug not in per_state:
-            per_state[state_slug] = []
-        per_state[state_slug].append(event)
-        
-        print(f"✓ Imported: {parsed['title']} ({parsed['state']}, {parsed['county']})")
+        for issue in issues:
+            issue_num = issue.get("number", "?")
+            body = issue.get("body", "")
+            
+            print(f"📋 Processing issue #{issue_num}...")
+            
+            parsed = parse_issue_body(body)
+            
+            # Normalize
+            parsed["type"] = normalize_event_type(parsed["type"])
+            parsed["date"] = normalize_date(parsed["date"])
+            
+            # Validate
+            if not validate_event(parsed):
+                print(f"   ⚠️  Skipping: Invalid or missing required fields")
+                print(f"      Title: {parsed['title'][:50] if parsed['title'] else '(empty)'}")
+                print(f"      Date: {parsed['date'] if parsed['date'] else '(empty)'}")
+                print(f"      State: {parsed['state'] if parsed['state'] else '(empty)'}")
+                print(f"      County: {parsed['county'] if parsed['county'] else '(empty)'}")
+                print()
+                continue
+            
+            # Build event object
+            event = {
+                "title": parsed["title"],
+                "date": parsed["date"],
+                "state": parsed["state"],
+                "county": parsed["county"],
+                "type": parsed["type"],
+                "notes": parsed["notes"],
+            }
+            
+            events.append(event)
+            
+            # Group by state
+            state_slug = slugify(parsed["state"])
+            if state_slug not in per_state:
+                per_state[state_slug] = []
+            per_state[state_slug].append(event)
+            
+            print(f"   ✓ Imported: {parsed['title']} ({parsed['state']}, {parsed['county']})")
+            print()
     
     # Write combined feed
-    combined_path = Path("community-events.json")
-    combined_path.write_text(json.dumps(events, indent=2))
-    print(f"\n📄 Wrote {len(events)} events to {combined_path}")
+    print("📝 Writing feeds...")
+    try:
+        combined_path = Path("community-events.json")
+        combined_path.write_text(json.dumps(events, indent=2, ensure_ascii=False))
+        print(f"   ✓ Wrote {len(events)} event(s) to {combined_path}")
+    except Exception as e:
+        print(f"   ERROR: Failed to write combined feed: {e}")
+        sys.exit(1)
     
     # Write per-state feeds
-    feeds_dir = Path("feeds")
-    feeds_dir.mkdir(exist_ok=True)
+    try:
+        feeds_dir = Path("feeds")
+        feeds_dir.mkdir(exist_ok=True)
+        
+        if per_state:
+            for state_slug, state_events in per_state.items():
+                state_path = feeds_dir / f"{state_slug}.json"
+                state_path.write_text(json.dumps(state_events, indent=2, ensure_ascii=False))
+                print(f"   ✓ Wrote {len(state_events)} event(s) to {state_path}")
+        else:
+            print(f"   ℹ️  No per-state feeds to write (no events)")
+    except Exception as e:
+        print(f"   ERROR: Failed to write per-state feeds: {e}")
+        sys.exit(1)
     
-    for state_slug, state_events in per_state.items():
-        state_path = feeds_dir / f"{state_slug}.json"
-        state_path.write_text(json.dumps(state_events, indent=2))
-        print(f"   📄 Wrote {len(state_events)} events to {state_path}")
-    
-    print("\n✅ Community events aggregation complete!")
+    print()
+    print("✅ Community events aggregation complete!")
+    print(f"   Total events: {len(events)}")
+    print(f"   States: {len(per_state)}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n\n❌ FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
