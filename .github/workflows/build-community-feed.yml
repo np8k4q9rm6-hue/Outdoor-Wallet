@@ -1,8 +1,8 @@
 - name: Generate community-events.json from approved issues
-        env:
+  env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-        run: |
+ run: |
           set -euo pipefail
 
           # Fetch open issues labeled 'community' AND 'approved'
